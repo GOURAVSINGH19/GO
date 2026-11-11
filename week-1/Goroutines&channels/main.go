@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"sync"
+	"time"
 )
 
 // go routines -> lightwait thread of execution managed by the GO runtime.
@@ -59,7 +60,8 @@ func task(wg *sync.WaitGroup) {
 // what is buffered
 // means when channel has capacity
 // Sender can proceed while buffer has space
-
+// we can send these values into the channel without a corresponding concurrent receive.
+// Later we can receive these two values as usual.
 func sendData(ch chan int) {
 	// sending data
 	ch <- 100
@@ -95,12 +97,23 @@ func send2(ch <-chan int) {
 // You don't have to close every channel.
 
 func worker(id int, jobs <-chan int, wg *sync.WaitGroup) {
-defer wg.Done()
+	defer wg.Done()
 
 	for job := range jobs {
 		fmt.Printf("Worker %d started job %d\n", id, job)
 	}
 }
+
+
+
+func worker2(done chan bool) {
+    fmt.Print("working...")
+    time.Sleep(time.Second)
+    fmt.Println("done")
+    done <- true
+} 
+
+
 func main() {
 
 	// var wg sync.WaitGroup
@@ -125,6 +138,11 @@ func main() {
 	// fmt.Println(value)
 	// fmt.Println(value2)
 
+	// without waithGroup
+	done := make (chan bool,1)
+	go worker2(done)
+	<-done
+	
 	jobs := make(chan int)
 
 	var wg sync.WaitGroup
@@ -141,5 +159,6 @@ func main() {
 	close(jobs)
 
 	wg.Wait()
+
 
 }
