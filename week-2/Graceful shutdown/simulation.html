@@ -1,0 +1,371 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Worker Pool Simulation</title>
+<style>
+:root{
+  --surface:#ffffff;--page:#f7f6f3;--neutral:#eeede8;
+  --text:#1f1e1c;--text2:#5f5e5a;--muted:#9a9993;
+  --border:rgba(0,0,0,.12);--border-strong:rgba(0,0,0,.25);
+  --acc-bg:#e6f1fb;--acc-tx:#185fa5;--acc-fill:#378add;
+  --ok-bg:#eaf3de;--ok-tx:#3b6d11;--ok-fill:#639922;
+  --warn-bg:#faeeda;--warn-tx:#854f0b;--warn-fill:#ba7517;
+  --bad-bg:#fcebeb;--bad-tx:#a32d2d;--bad-fill:#e24b4a;
+  --mono:ui-monospace,SFMono-Regular,Consolas,"Liberation Mono",monospace;
+}
+@media (prefers-color-scheme: dark){
+  :root{
+    --surface:#262624;--page:#1c1c1a;--neutral:#30302e;
+    --text:#f1efe8;--text2:#b4b2a9;--muted:#888780;
+    --border:rgba(255,255,255,.12);--border-strong:rgba(255,255,255,.25);
+    --acc-bg:#0c447c;--acc-tx:#b5d4f4;--acc-fill:#378add;
+    --ok-bg:#27500a;--ok-tx:#c0dd97;--ok-fill:#639922;
+    --warn-bg:#633806;--warn-tx:#fac775;--warn-fill:#ef9f27;
+    --bad-bg:#791f1f;--bad-tx:#f7c1c1;--bad-fill:#e24b4a;
+  }
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--page);color:var(--text);font-family:system-ui,-apple-system,"Segoe UI",sans-serif;padding:24px 16px}
+.wrap{max-width:760px;margin:0 auto}
+h1{font-size:22px;font-weight:500;margin:0 0 4px}
+.sub{color:var(--text2);font-size:14px;margin:0 0 20px;line-height:1.6}
+code{font-family:var(--mono);font-size:13px}
+button,select{font:inherit;font-size:14px;padding:7px 14px;border-radius:8px;border:0.5px solid var(--border-strong);background:transparent;color:var(--text);cursor:pointer}
+select{padding:6px 8px;background:var(--surface)}
+button:hover{background:var(--neutral)}
+button:active{transform:scale(.98)}
+.row{display:flex;gap:12px;align-items:stretch;flex-wrap:wrap}
+.card{background:var(--surface);border:0.5px solid var(--border);border-radius:12px;padding:12px 14px}
+.lbl{font-size:12px;color:var(--text2);margin:0 0 6px}
+.slot{width:44px;height:44px;border-radius:8px;border:0.5px dashed var(--border-strong);display:flex;align-items:center;justify-content:center;font-size:13px;font-family:var(--mono)}
+.slot.full{border-style:solid;background:var(--acc-bg);color:var(--acc-tx);border-color:var(--acc-fill)}
+.pill{display:inline-block;font-size:12px;padding:2px 10px;border-radius:8px}
+.bar{height:6px;border-radius:3px;background:var(--neutral);overflow:hidden;margin-top:8px}
+.bar>div{height:100%;background:var(--acc-fill);width:0}
+.log{font-family:var(--mono);font-size:12px;line-height:1.6;height:224px;overflow:hidden;display:flex;flex-direction:column;justify-content:flex-end}
+.stat{background:var(--neutral);border-radius:8px;padding:8px 12px;flex:1;min-width:90px}
+.stat b{display:block;font-size:20px;font-weight:500}
+.mb{margin-bottom:12px}
+.ctxname{font-family:var(--mono);font-size:13px;margin:0 0 6px}
+.ctxsrc{font-size:12px;color:var(--text2);margin:6px 0 0}
+</style>
+</head>
+<body>
+<div class="wrap">
+<h1>Worker pool with context cancellation</h1>
+<p class="sub">Ctrl + C cancels <code>ctx</code>, which stops the producer. Workers keep draining the queue until <code>shutdownCtx</code> times out. If it does, <code>cancelWork()</code> cancels the jobs still running. Set the timeout to 1s to watch that happen.</p>
+
+<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:0 0 14px">
+  <button id="b-run">▶ go run main.go</button>
+  <button id="b-sig" style="border-color:var(--bad-tx);color:var(--bad-tx)">Ctrl + C</button>
+  <button id="b-kill">kill -9</button>
+  <button id="b-reset">Reset</button>
+  <span style="flex:1"></span>
+  <label style="font-size:13px;color:var(--text2)" for="tmo">shutdownTimeout</label>
+  <select id="tmo">
+    <option value="500">0.5s</option>
+    <option value="1000">1s</option>
+    <option value="2000">2s</option>
+    <option value="5000" selected>5s</option>
+  </select>
+  <label style="font-size:13px;color:var(--text2)" for="spd">Speed</label>
+  <input type="range" id="spd" min="0.25" max="4" step="0.25" value="1" style="width:90px">
+  <span id="spd-o" style="font-size:13px;min-width:32px">1x</span>
+</div>
+
+<div class="row mb">
+  <div class="card" style="flex:1;min-width:150px">
+    <p class="lbl">Producer goroutine</p>
+    <div id="p-st" class="pill"></div>
+    <p style="font-size:13px;margin:8px 0 0;color:var(--text2)">Next job: <span id="p-next" style="font-family:var(--mono);color:var(--text)">1</span> / 20</p>
+  </div>
+  <div class="card" style="flex:2;min-width:290px">
+    <p class="lbl">jobs := make(chan int, 5) <span id="ch-st" class="pill" style="margin-left:6px"></span></p>
+    <div id="slots" style="display:flex;gap:6px;flex-wrap:wrap"></div>
+  </div>
+</div>
+
+<div class="row mb" id="workers"></div>
+
+<div class="row mb">
+  <div class="card" style="flex:1;min-width:180px">
+    <p class="ctxname">ctx</p>
+    <span id="c-sig" class="pill"></span>
+    <p class="ctxsrc">signal.NotifyContext · stops producer</p>
+  </div>
+  <div class="card" style="flex:1;min-width:180px">
+    <p class="ctxname">shutdownCtx</p>
+    <span id="c-sd" class="pill"></span>
+    <div class="bar"><div id="c-sd-bar"></div></div>
+    <p class="ctxsrc">context.WithTimeout · drain deadline</p>
+  </div>
+  <div class="card" style="flex:1;min-width:180px">
+    <p class="ctxname">workCtx</p>
+    <span id="c-wk" class="pill"></span>
+    <p class="ctxsrc">context.WithCancel · stops workers</p>
+  </div>
+</div>
+
+<div class="row mb">
+  <div class="card" style="flex:2;min-width:240px">
+    <p class="lbl">main goroutine is blocked on</p>
+    <div id="m-st" style="font-family:var(--mono);font-size:14px"></div>
+  </div>
+  <div class="card" style="flex:1;min-width:150px">
+    <p class="lbl">sync.WaitGroup counter</p>
+    <div id="wg" style="font-size:22px;font-weight:500"></div>
+  </div>
+</div>
+
+<div class="row mb">
+  <div class="stat"><span class="lbl">Produced</span><b id="s-p">0</b></div>
+  <div class="stat"><span class="lbl">Completed</span><b id="s-c" style="color:var(--ok-tx)">0</b></div>
+  <div class="stat"><span class="lbl">Cancelled / skipped</span><b id="s-x" style="color:var(--warn-tx)">0</b></div>
+  <div class="stat"><span class="lbl">Never sent</span><b id="s-n">20</b></div>
+  <div class="stat"><span class="lbl">Lost (kill -9)</span><b id="s-l" style="color:var(--bad-tx)">0</b></div>
+</div>
+
+<div class="card"><p class="lbl">stdout</p><div class="log" id="log"></div></div>
+</div>
+
+<script>
+const CAP = 5, TOTAL = 20, JOB = 1000, PROD = 250, NW = 3;
+let S, running = false, last = 0, speed = 1, timeout = 5000;
+const $ = id => document.getElementById(id);
+
+function reset() {
+  S = {
+    next: 1, buf: [], jobsClosed: false, pState: 'not started', pCd: 0, pDone: false,
+    ws: Array.from({length: NW}, (_, i) => ({id: i + 1, job: null, rem: 0, st: 'idle'})),
+    wg: NW, main: 'not started', produced: 0, done: 0, cancelled: 0, lost: 0,
+    sigCancelled: false,   // ctx
+    sdLeft: null,          // shutdownCtx remaining ms (null = not created yet)
+    sdTimeout: timeout,
+    sdExpired: false,
+    workCancelled: false,  // workCtx
+    log: [], started: false, killed: false, exitCode: null
+  };
+  running = false;
+  render();
+}
+
+function log(m, c) { S.log.push([m, c]); if (S.log.length > 14) S.log.shift(); }
+
+function start() {
+  if (S.started) return;
+  S.started = true; running = true;
+  S.pState = 'running'; S.main = 'ctx.Done()';
+  log('$ go run main.go', 'var(--muted)');
+  last = performance.now();
+  setTimeout(() => loop(performance.now()), 30);
+}
+
+function closeJobs() { S.jobsClosed = true; S.pDone = true; }
+
+// One simulation tick (dt in simulated ms).
+function step(dt) {
+  // Producer: select { case <-ctx.Done(): return; case jobs <- j: }
+  if (!S.pDone) {
+    if (S.sigCancelled) {
+      log('Producer stopped: context canceled', 'var(--warn-tx)');
+      S.pState = 'stopped (ctx.Done)';
+      closeJobs();
+    } else {
+      S.pCd -= dt;
+      if (S.pCd <= 0) {
+        if (S.buf.length < CAP) {
+          const j = S.next++;
+          S.buf.push(j); S.produced++;
+          log('Produced Job: ' + j);
+          S.pCd = PROD; S.pState = 'running';
+          if (S.next > TOTAL) {
+            log('All jobs submitted', 'var(--ok-tx)');
+            S.pState = 'done';
+            closeJobs();
+          }
+        } else {
+          S.pState = 'blocked: jobs <- ' + S.next;
+        }
+      }
+    }
+  }
+
+  // Workers: for job := range jobs { select { case <-time.After: case <-workCtx.Done(): } }
+  for (const w of S.ws) {
+    if (w.st === 'busy') {
+      if (S.workCancelled) {
+        log('Worker ' + w.id + ' cancelled Job ' + w.job + ': context canceled', 'var(--warn-tx)');
+        S.cancelled++; w.job = null; w.st = 'idle';
+      } else {
+        w.rem -= dt;
+        if (w.rem <= 0) {
+          log('Worker ' + w.id + ' completed Job ' + w.job, 'var(--ok-tx)');
+          S.done++; w.job = null; w.st = 'idle';
+        }
+      }
+    }
+    if (w.st === 'idle') {
+      while (S.workCancelled && S.buf.length) {
+        const j = S.buf.shift();
+        log('Worker ' + w.id + ' skipping Job ' + j + ': context canceled', 'var(--warn-tx)');
+        S.cancelled++;
+      }
+      if (S.buf.length) {
+        w.job = S.buf.shift(); w.rem = JOB; w.st = 'busy';
+        log('Worker ' + w.id + ' processing Job ' + w.job);
+      } else if (S.jobsClosed) {
+        w.st = 'stopped'; S.wg--;
+        log('Worker ' + w.id + ' stopped', 'var(--text2)');
+      }
+    }
+  }
+
+  // main: select { case <-allDone: case <-shutdownCtx.Done(): }
+  if (S.main === 'select') {
+    const allDone = S.pDone && S.wg === 0;
+    if (allDone) {
+      S.main = 'exited'; S.exitCode = S.sdExpired ? 1 : 0;
+      if (S.sdExpired) log('Server stopped with error: context deadline exceeded', 'var(--bad-tx)');
+      else log('Server stopped gracefully!', 'var(--ok-tx)');
+      running = false;
+      return;
+    }
+    if (!S.sdExpired) {
+      S.sdLeft -= dt;
+      if (S.sdLeft <= 0) {
+        S.sdLeft = 0; S.sdExpired = true; S.workCancelled = true;
+        log('Shutdown deadline exceeded, cancelling in-flight jobs', 'var(--bad-tx)');
+        S.main = 'allDone';
+      }
+    }
+  }
+  if (S.main === 'allDone' && S.pDone && S.wg === 0) {
+    S.main = 'exited'; S.exitCode = 1;
+    log('Server stopped with error: context deadline exceeded', 'var(--bad-tx)');
+    running = false;
+  }
+}
+
+function loop(now) {
+  if (!running) return render();
+  let dt = Math.min(now - last, 100) * speed;
+  last = now;
+  while (dt > 0) {
+    const d = Math.min(dt, 20);
+    step(d); dt -= d;
+    if (!running) break;
+  }
+  render();
+  if (running) setTimeout(() => loop(performance.now()), 30);
+}
+
+function signal() {
+  if (!S.started || S.main === 'exited' || S.killed || S.sigCancelled) return;
+  log('^C', 'var(--bad-tx)');
+  log('Shutdown signal received!', 'var(--bad-tx)');
+  S.sigCancelled = true;          // ctx cancelled
+  S.sdTimeout = timeout;
+  S.sdLeft = timeout;             // shutdownCtx created
+  S.main = 'select';
+}
+
+function kill() {
+  if (!S.started || S.main === 'exited' || S.killed) return;
+  const inflight = S.ws.filter(w => w.st === 'busy').length;
+  S.lost = inflight + S.buf.length;
+  log('Killed. ' + S.lost + ' accepted job(s) lost mid-flight', 'var(--bad-tx)');
+  S.killed = true; S.main = 'killed'; S.pState = 'killed';
+  S.buf = [];
+  S.ws.forEach(w => { w.st = 'killed'; });
+  running = false;
+  render();
+}
+
+const KINDS = {
+  ok: ['--ok-bg', '--ok-tx'], warn: ['--warn-bg', '--warn-tx'], bad: ['--bad-bg', '--bad-tx'],
+  acc: ['--acc-bg', '--acc-tx'], n: ['--neutral', '--text2']
+};
+function pill(el, txt, kind) {
+  el.textContent = txt;
+  el.style.background = 'var(' + KINDS[kind][0] + ')';
+  el.style.color = 'var(' + KINDS[kind][1] + ')';
+}
+
+function render() {
+  const ps = S.pState;
+  pill($('p-st'), ps, ps === 'running' ? 'acc' : ps.startsWith('blocked') ? 'warn' : ps === 'done' ? 'ok' : ps === 'not started' ? 'n' : 'bad');
+  $('p-next').textContent = S.next > TOTAL ? '—' : S.next;
+
+  $('slots').innerHTML = Array.from({length: CAP}, (_, i) => {
+    const j = S.buf[i];
+    return '<div class="slot' + (j ? ' full' : '') + '">' + (j || '') + '</div>';
+  }).join('');
+  pill($('ch-st'), S.jobsClosed ? 'closed' : 'open', S.jobsClosed ? 'bad' : 'ok');
+
+  $('workers').innerHTML = S.ws.map(w => {
+    const k = w.st === 'busy' ? 'acc' : w.st === 'idle' ? 'n' : w.st === 'stopped' ? 'ok' : 'bad';
+    const lbl = w.st === 'busy' ? 'Job ' + w.job
+      : w.st === 'idle' ? (S.started ? 'waiting on range jobs' : 'idle')
+      : w.st === 'stopped' ? 'stopped, wg.Done()' : 'killed';
+    const pct = w.st === 'busy' ? Math.round(100 * (1 - w.rem / JOB)) : w.st === 'stopped' ? 100 : 0;
+    return '<div class="card" style="flex:1;min-width:150px"><p class="lbl">Worker ' + w.id + '</p>' +
+      '<span class="pill" data-k="' + k + '">' + lbl + '</span>' +
+      '<div class="bar"><div style="width:' + pct + '%;' + (w.st === 'stopped' ? 'background:var(--ok-fill)' : '') + '"></div></div></div>';
+  }).join('');
+  $('workers').querySelectorAll('[data-k]').forEach(e => pill(e, e.textContent, e.dataset.k));
+
+  // Contexts
+  if (S.killed) {
+    pill($('c-sig'), 'process killed', 'bad');
+  } else {
+    pill($('c-sig'), !S.started ? 'not created' : S.sigCancelled ? 'cancelled (signal)' : 'active, waiting for signal', !S.started ? 'n' : S.sigCancelled ? 'bad' : 'acc');
+  }
+  const sdBar = $('c-sd-bar');
+  if (S.sdLeft === null) {
+    pill($('c-sd'), 'not created yet', 'n');
+    sdBar.style.width = '0';
+  } else if (S.sdExpired) {
+    pill($('c-sd'), 'deadline exceeded', 'bad');
+    sdBar.style.width = '100%'; sdBar.style.background = 'var(--bad-fill)';
+  } else if (S.main === 'exited') {
+    pill($('c-sd'), 'finished in time, cancel()', 'ok');
+    sdBar.style.background = 'var(--ok-fill)';
+  } else {
+    pill($('c-sd'), (S.sdLeft / 1000).toFixed(1) + 's left', 'warn');
+    sdBar.style.width = Math.round(100 * (1 - S.sdLeft / S.sdTimeout)) + '%';
+    sdBar.style.background = 'var(--warn-fill)';
+  }
+  pill($('c-wk'), !S.started ? 'not created' : S.workCancelled ? 'cancelled (cancelWork)' : S.main === 'exited' ? 'released by defer' : 'active', !S.started ? 'n' : S.workCancelled ? 'bad' : S.main === 'exited' ? 'ok' : 'acc');
+
+  const ms = {
+    'not started': ['not started', 'var(--muted)'],
+    'ctx.Done()': ['<-ctx.Done()  // waiting for Ctrl+C', 'var(--text)'],
+    'select': ['select { <-allDone | <-shutdownCtx.Done() }', 'var(--warn-tx)'],
+    'allDone': ['<-allDone  // after cancelWork()', 'var(--bad-tx)'],
+    'exited': [S.exitCode === 0 ? 'exited (code 0)' : 'exited (code 1)', S.exitCode === 0 ? 'var(--ok-tx)' : 'var(--bad-tx)'],
+    'killed': ['killed (no cleanup)', 'var(--bad-tx)']
+  }[S.main];
+  $('m-st').textContent = ms[0];
+  $('m-st').style.color = ms[1];
+
+  $('wg').textContent = S.wg + ' / ' + NW;
+  $('s-p').textContent = S.produced;
+  $('s-c').textContent = S.done;
+  $('s-x').textContent = S.cancelled;
+  $('s-n').textContent = TOTAL - S.produced;
+  $('s-l').textContent = S.lost;
+  $('log').innerHTML = S.log.map(([m, c]) => '<div style="color:' + (c || 'var(--text)') + '">' + m.replace(/</g, '&lt;') + '</div>').join('');
+}
+
+$('b-run').onclick = start;
+$('b-sig').onclick = signal;
+$('b-kill').onclick = kill;
+$('b-reset').onclick = reset;
+$('spd').oninput = e => { speed = +e.target.value; $('spd-o').textContent = speed + 'x'; };
+$('tmo').onchange = e => { timeout = +e.target.value; };
+reset();
+</script>
+</body>
+</html>
